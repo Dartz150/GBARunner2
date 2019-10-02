@@ -4,7 +4,7 @@
 //#define ARM7_DLDI
 
 //#define USE_DSI_16MB
-//#define USE_3DS_32MB
+#define USE_3DS_32MB
 
 #if defined(USE_DSI_16MB)
 #define UNCACHED_OFFSET     (-0x0A000000)
