@@ -17,10 +17,8 @@
 #include "FileBrowserListAdapter.h"
 #include "core/InputRepeater.h"
 #include "qsort.h"
-#include "crc16.h"
-#include "save/Save.h"
-#include "bios.h"
-#include "gamePatches.h"
+#include "settings.h"
+#include "gbaBoot.h"
 #include "FileBrowser.h"
 
 static int compDirEntries(const FILINFO*& dir1, const FILINFO*& dir2)
@@ -42,10 +40,12 @@ void FileBrowser::LoadFolder(const char* path)
 	{
 		if (f_readdir(&vram_cd->dir, &info) != FR_OK)
 			_uiContext->FatalError("Error while reading directory!");
-		if (info.fattrib & (AM_SYS | AM_HID))
-			continue;
+		//First check end of directory, otherwise attributes are not valid!	
 		if (info.fname[0] == 0)
 			break;
+		//Don't show system and hidden files
+		if (info.fattrib & (AM_SYS | AM_HID))
+			continue;
 		uint8_t* point_ptr = (uint8_t*)strrchr(info.fname, '.');
 		if (info.fattrib & AM_DIR || (point_ptr && !strcasecmp((char*)point_ptr, ".gba")))
 		{
@@ -99,120 +99,28 @@ void FileBrowser::LoadFolder(const char* path)
 	InvalidateCover();
 }
 
-void FileBrowser::CreateLoadSave(const char* path, const save_type_t* saveType)
-{
-	if (saveType)
-		vram_cd->save_work.saveSize = saveType->size;
-	else
-		vram_cd->save_work.saveSize = 64 * 1024;
-	vram_cd->save_work.save_state = SAVE_WORK_STATE_CLEAN;
-	if (f_open(&vram_cd->fil, path, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-	{
-		if (saveType && (saveType->type & SAVE_TYPE_TYPE_MASK) == SAVE_TYPE_FLASH)
-		{
-			for (int i = 0; i < vram_cd->save_work.saveSize >> 2; i++)
-				((uint32_t*)MAIN_MEMORY_ADDRESS_SAVE_DATA)[i] = 0xFFFFFFFF;
-		}
-		else
-		{
-			for (int i = 0; i < vram_cd->save_work.saveSize >> 2; i++)
-				((uint32_t*)MAIN_MEMORY_ADDRESS_SAVE_DATA)[i] = 0;
-		}
-
-#ifdef ISNITRODEBUG
-		vram_cd->save_work.save_enabled = 0;
-		return;
-#else
-		if (f_open(&vram_cd->fil, path, FA_CREATE_NEW | FA_WRITE) != FR_OK)
-			_uiContext->FatalError("Error creating save file!");
-
-		UINT bw;
-		if (f_write(&vram_cd->fil, (void*)MAIN_MEMORY_ADDRESS_SAVE_DATA, vram_cd->save_work.saveSize, &bw) != FR_OK ||
-			bw != vram_cd->save_work.saveSize)
-			_uiContext->FatalError("Error creating save file!");
-		f_close(&vram_cd->fil);
-		if (f_open(&vram_cd->fil, path, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-			_uiContext->FatalError("Error creating save file!");
-#endif
-	}
-
-	if (saveType && (saveType->type & SAVE_TYPE_TYPE_MASK) == SAVE_TYPE_EEPROM && vram_cd->fil.obj.objsize == 512)
-		vram_cd->save_work.saveSize = 512;
-
-	if (vram_cd->fil.obj.objsize < vram_cd->save_work.saveSize)
-		_uiContext->FatalError("Save file too small!");
-
-	uint32_t* cluster_table = &vram_cd->save_work.save_fat_table[0];
-	uint32_t  cur_cluster = vram_cd->fil.obj.sclust;
-	while (cur_cluster >= 2 && cur_cluster != 0xFFFFFFFF)
-	{
-		*cluster_table = f_clst2sect(&vram_cd->fatFs, cur_cluster);
-		cluster_table++;
-		cur_cluster = f_getFat(&vram_cd->fil, cur_cluster);
-	}
-	*cluster_table = 0;
-
-	UINT br;
-	if (f_read(&vram_cd->fil, (void*)MAIN_MEMORY_ADDRESS_SAVE_DATA, vram_cd->save_work.saveSize, &br) != FR_OK ||
-		br != vram_cd->save_work.saveSize)
-		_uiContext->FatalError("Error while reading save file!");
-	f_close(&vram_cd->fil);
-
-	vram_cd->save_work.fat_table_crc = crc16(0xFFFF, vram_cd->save_work.save_fat_table,
-	                                         sizeof(vram_cd->save_work.save_fat_table));
-#ifdef ISNITRODEBUG
-	vram_cd->save_work.save_enabled = 0;
-#else
-	vram_cd->save_work.save_enabled = 1;
-#endif
-}
-
-void FileBrowser::LoadGame(const char* path)
+void FileBrowser::LoadGame(const char* path)//, u32 id)
 {
 	if(_coverLoadState == COVER_LOAD_STATE_LOAD)
 		f_close(&vram_cd->fil);
-	if (f_open(&vram_cd->fil, path, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-		_uiContext->FatalError("Error while opening rom!");
-	vram_cd->sd_info.gba_rom_size = vram_cd->fil.obj.objsize;
-	uint32_t* cluster_table = &vram_cd->gba_rom_cluster_table[0];
-	uint32_t  cur_cluster = vram_cd->fil.obj.sclust;
-	while (cur_cluster >= 2 && cur_cluster != 0xFFFFFFFF)
+
+	//gbab_loadFrame(id);
+
+	switch(gbab_loadRom(path))
 	{
-		*cluster_table = f_clst2sect(&vram_cd->fatFs, cur_cluster);
-		cluster_table++;
-		cur_cluster = f_getFat(&vram_cd->fil, cur_cluster);
-	}
-	UINT br;
-	if (f_read(&vram_cd->fil, (void*)MAIN_MEMORY_ADDRESS_ROM_DATA, ROM_DATA_LENGTH, &br) != FR_OK)
-		_uiContext->FatalError("Error while reading rom!");
-
-	const save_type_t* saveType = save_findTag();
-	if (saveType != NULL)
-	{
-		if (saveType->patchFunc != NULL)
-			saveType->patchFunc(saveType);
-	}
-
-	f_close(&vram_cd->fil);
-
-	gptc_patchRom();
-
-	char nameBuf[256];
-	for (int i = 0; i < 256; i++)
-	{
-		char c = path[i];
-		nameBuf[i] = c;
-		if (c == 0)
+		case ROM_LOAD_RESULT_ROM_READ_ERR:
+			_uiContext->FatalError("Error while reading rom!");
+			break;
+		case ROM_LOAD_RESULT_SAVE_CREATE_ERR:
+			_uiContext->FatalError("Error creating save file!");
+			break;
+		case ROM_LOAD_RESULT_SAVE_TOO_SMALL:
+			_uiContext->FatalError("Save file too small!");
+			break;
+		case ROM_LOAD_RESULT_SAVE_READ_ERR:
+			_uiContext->FatalError("Error while reading save file!");
 			break;
 	}
-
-	char* long_name_ptr = strrchr(nameBuf, '.');
-	long_name_ptr[1] = 's';
-	long_name_ptr[2] = 'a';
-	long_name_ptr[3] = 'v';
-	long_name_ptr[4] = '\0';
-
-	CreateLoadSave(nameBuf, saveType);
 }
 
 static bool loadCover(const char* path)
@@ -308,8 +216,8 @@ int FileBrowser::Run()
 	LoadFolder(".");
 	while (1)
 	{		
-		_inputRepeater.Update(~*((vu16*)0x04000130));
-		if (_inputRepeater.GetTriggeredKeys() & (1 << 6))
+		_inputRepeater.Update(~keys_read());
+		if (_inputRepeater.GetTriggeredKeys() & KEY_UP)
 		{
 			if (_selectedEntry > 0)
 			{
@@ -317,7 +225,7 @@ int FileBrowser::Run()
 				InvalidateCover();
 			}
 		}
-		else if (_inputRepeater.GetTriggeredKeys() & (1 << 7))
+		else if (_inputRepeater.GetTriggeredKeys() & KEY_DOWN)
 		{
 			if (_selectedEntry < _entryCount - 1)
 			{
@@ -325,7 +233,7 @@ int FileBrowser::Run()
 				InvalidateCover();
 			}
 		}
-		else if (_inputRepeater.GetTriggeredKeys() & 1)
+		else if (_inputRepeater.GetTriggeredKeys() & KEY_A)
 		{
 			if (_sortedEntries[_selectedEntry]->fattrib & AM_DIR)
 			{
@@ -334,16 +242,16 @@ int FileBrowser::Run()
 			}
 			else
 			{
-				LoadGame(_sortedEntries[_selectedEntry]->fname);
+				LoadGame(_sortedEntries[_selectedEntry]->fname);//, _ids[_selectedEntry]);
 				break;
 			}
 		}
-		else if (_inputRepeater.GetTriggeredKeys() & 2)
+		else if (_inputRepeater.GetTriggeredKeys() & KEY_B)
 		{
 			f_chdir("..");
 			LoadFolder(".");
 		}
-		else if (_inputRepeater.GetTriggeredKeys() & (1 << 8))
+		else if (_inputRepeater.GetTriggeredKeys() & KEY_R)
 		{
 			next = 1;
 			break;
